@@ -33,7 +33,7 @@ class Post(db.Model):
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
-    comments = db.relationship('Comment', backref='post', lazy=True)
+    comments = db.relationship('Comment', backref='post', lazy=True, cascade="all, delete-orphan")
 
 
 class Comment(db.Model):
@@ -287,17 +287,25 @@ def delete_post(post_id):
 @app.route('/comments/<int:comment_id>', methods=['DELETE', 'OPTIONS'])
 @jwt_required
 def delete_comment(comment_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     comment = Comment.query.get(comment_id)
     if not comment:
         return jsonify({'error': 'Комментарий не найден'}), 404
 
     user = User.query.get(request.user_id)
-    if not user or (user.role != 'Admin' and comment.user_id != user.id):
+    if not user:
+        return jsonify({'error': 'Доступ запрещён'}), 403
+
+    # Разрешаем удаление, если пользователь имеет роль Admin или Moderator,
+    # либо если пользователь является автором комментария
+    if user.role not in ['Admin', 'Moderator'] and comment.user_id != user.id:
         return jsonify({'error': 'Доступ запрещён'}), 403
 
     db.session.delete(comment)
     db.session.commit()
     return jsonify({'message': 'Комментарий удалён'}), 200
+
 
 @app.route('/posts/<int:post_id>', methods=['PUT', 'OPTIONS'])
 @jwt_required
@@ -337,6 +345,26 @@ def update_post(post_id):
             'username': post.author.username
         }
     }), 200
+
+@app.route('/comments', methods=['GET'])
+@jwt_required
+def get_all_comments():
+    # Проверяем, что текущий пользователь имеет роль Admin или Moderator
+    user = User.query.get(request.user_id)
+    if not user or user.role not in ['Admin', 'Moderator']:
+        return jsonify({'error': 'Доступ запрещён. Только администратор или модератор могут просматривать комментарии.'}), 403
+
+    comments = Comment.query.order_by(Comment.created_at.desc()).all()
+    result = [{
+        'id': comment.id,
+        'content': comment.content,
+        'created_at': comment.created_at.isoformat(),
+        'user_id': comment.user_id,
+        'user_username': comment.author.username,
+        'post_id': comment.post_id
+    } for comment in comments]
+    return jsonify(result), 200
+
 
 
 if __name__ == '__main__':
