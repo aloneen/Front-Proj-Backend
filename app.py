@@ -11,8 +11,10 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///postit.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'your-secret-key'  # Замените на надёжный ключ
 db = SQLAlchemy(app)
-CORS(app, supports_credentials=True)
-
+CORS(app,
+     resources={r"*": {"origins": "*", "methods": ["GET","POST","PUT","DELETE","OPTIONS"]}},
+     supports_credentials=True
+)
 
 # Обновлённые модели с каскадным удалением
 class User(db.Model):
@@ -267,13 +269,16 @@ def admin_delete_user(user_id):
 @app.route('/posts/<int:post_id>', methods=['DELETE', 'OPTIONS'])
 @jwt_required
 def delete_post(post_id):
-    user = User.query.get(request.user_id)
-    if not user or user.role != 'Admin':
-        return jsonify({'error': 'Доступ запрещён'}), 403
-
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     post = Post.query.get(post_id)
     if not post:
         return jsonify({'error': 'Пост не найден'}), 404
+
+    user = User.query.get(request.user_id)
+    # Разрешаем удаление, если пользователь - админ или автор поста
+    if not user or (user.role != 'Admin' and post.user_id != user.id):
+        return jsonify({'error': 'Доступ запрещён'}), 403
 
     db.session.delete(post)
     db.session.commit()
@@ -294,6 +299,44 @@ def delete_comment(comment_id):
     db.session.commit()
     return jsonify({'message': 'Комментарий удалён'}), 200
 
+@app.route('/posts/<int:post_id>', methods=['PUT', 'OPTIONS'])
+@jwt_required
+def update_post(post_id):
+    if request.method == 'OPTIONS':
+        return {}, 200  # preflight
+
+    data = request.get_json() or {}
+    new_title = data.get('title', '').strip()
+    new_content = data.get('content', '').strip()
+
+    if not new_title or not new_content:
+        return jsonify({'error': 'Title и Content обязательны'}), 400
+
+    post = Post.query.get(post_id)
+    if not post:
+        return jsonify({'error': 'Пост не найден'}), 404
+
+    user = User.query.get(request.user_id)
+    # Проверка роли: автор поста или админ
+    if not user or (user.role != 'Admin' and post.user_id != user.id):
+        return jsonify({'error': 'Доступ запрещён'}), 403
+
+    # Обновляем поля
+    post.title = new_title
+    post.content = new_content
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Пост успешно обновлён',
+        'post': {
+            'id': post.id,
+            'title': post.title,
+            'content': post.content,
+            'created_at': post.created_at.isoformat(),
+            'user_id': post.user_id,
+            'username': post.author.username
+        }
+    }), 200
 
 
 if __name__ == '__main__':
