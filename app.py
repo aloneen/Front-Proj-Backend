@@ -1,223 +1,276 @@
-
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
-from datetime import timedelta
-from flask_bcrypt import Bcrypt
-
-
+import jwt
+from functools import wraps
 
 app = Flask(__name__)
-CORS(app)
-
-# Конфигурация
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///postit.db'
-app.config['SECRET_KEY'] = 'secret-key'
-app.config['JWT_SECRET_KEY'] = 'jwt-secret-key'
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)
-
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'your-secret-key'  # Замените на надёжный ключ
 db = SQLAlchemy(app)
-jwt = JWTManager(app)
+CORS(app, supports_credentials=True)
 
-bcrypt = Bcrypt(app)
 
-# ---------- Модели ----------
-
+# Модели
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(50), unique=True)
-    email = db.Column(db.String(100), unique=True)
-    password = db.Column(db.String(200))
-    role = db.Column(db.String(20))  # Admin, Moderator, User
-
-    posts = db.relationship('Post', backref='user', lazy=True)
-    comments = db.relationship('Comment', backref='user', lazy=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    role = db.Column(db.String(20), default='User')
+    posts = db.relationship('Post', backref='author', lazy=True)
+    comments = db.relationship('Comment', backref='author', lazy=True)
 
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(150))
-    content = db.Column(db.Text)
+    title = db.Column(db.String(200), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)  # Новый столбец
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-
     comments = db.relationship('Comment', backref='post', lazy=True)
 
 
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    content = db.Column(db.Text)
-    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=False)
 
 
-# ---------- Вспомогательные функции ----------
+# Декоратор для проверки JWT-токена
+def jwt_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        auth_header = request.headers.get('Authorization', None)
+        if auth_header is None or not auth_header.startswith("Bearer "):
+            return jsonify({'error': 'Token is missing'}), 401
+        token = auth_header.split(" ")[1]
+        try:
+            payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+        # Сохраняем user_id в request, чтобы использовать в эндпоинте
+        request.user_id = payload['user_id']
+        return func(*args, **kwargs)
 
-def is_admin():
-    current_user = get_jwt_identity()
-    user = User.query.filter_by(id=current_user).first()
-    return user.role == 'Admin'
+    return wrapper
 
 
-# ---------- Аутентификация ----------
+# Эндпоинты аутентификации и регистрации
 
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
-    username = data.get('username')
-    email = data.get('email')
-    password = data.get('password')
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    email = data.get('email', '').strip()
+    password = data.get('password', '')
 
     if not username or not email or not password:
-        return jsonify({'message': 'Missing username, email, or password'}), 400
+        return jsonify({'error': 'Username, email и password обязательны'}), 400
 
-    # check if user exists
-    existing_user = User.query.filter_by(email=email).first()
-    if existing_user:
-        return jsonify({'message': 'User already exists'}), 400
+    if User.query.filter((User.username == username) | (User.email == email)).first():
+        return jsonify({'error': 'Пользователь с таким именем или email уже существует'}), 400
 
-    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+    hashed_password = generate_password_hash(password)
     new_user = User(username=username, email=email, password=hashed_password)
     db.session.add(new_user)
     db.session.commit()
-
-    return jsonify({'message': 'User registered successfully'}), 201
-
+    return jsonify({
+        'message': 'Регистрация успешна',
+        'user': {
+            'id': new_user.id,
+            'username': new_user.username,
+            'email': new_user.email
+        }
+    }), 201
 
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
+    data = request.get_json() or {}
+    email = data.get('email', '').strip()
+    password = data.get('password', '')
+
+    if not email or not password:
+        return jsonify({'error': 'Email и password обязательны'}), 400
 
     user = User.query.filter_by(email=email).first()
-    if user and bcrypt.check_password_hash(user.password, password):
-        access_token = create_access_token(identity={'id': user.id, 'role': user.role})
-        return jsonify({'access_token': access_token}), 200
-
-    return jsonify({'message': 'Invalid credentials'}), 401
-
-
-# ---------- CRUD Users ----------
-
-@app.route('/users', methods=['GET'])
-@jwt_required()
-def get_users():
-    users = User.query.all()
-    return jsonify([{'id': u.id, 'username': u.username, 'email': u.email, 'role': u.role} for u in users])
-
-
-@app.route('/users/<int:user_id>', methods=['DELETE'])
-@jwt_required()
-def delete_user(user_id):
-    if not is_admin():
-        return jsonify({'message': 'Access denied'}), 403
-    user = User.query.get_or_404(user_id)
-    db.session.delete(user)
-    db.session.commit()
-    return jsonify({'message': 'User deleted'})
+    if user and check_password_hash(user.password, password):
+        # Генерируем токен с истечением через 1 час
+        token = jwt.encode(
+            {'user_id': user.id, 'exp': datetime.utcnow() + timedelta(hours=1)},
+            app.config['SECRET_KEY'], algorithm='HS256'
+        )
+        return jsonify({
+            'message': 'Вход успешен',
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'role': user.role
+            },
+            'token': token
+        }), 200
+    else:
+        return jsonify({'error': 'Неверные учетные данные'}), 401
 
 
-# ---------- CRUD Posts ----------
-# ---------- CRUD Posts ----------
+# Эндпоинт для получения текущего пользователя (требует JWT)
+@app.route('/user', methods=['GET'])
+@jwt_required
+def get_current_user():
+    user = User.query.get(request.user_id)
+    if not user:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+    return jsonify({
+        'user': {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role
+        }
+    }), 200
+
+
+# Работа с постами
 
 @app.route('/posts', methods=['GET'])
 def get_posts():
-    # current_user = get_jwt_identity()
-    # posts = Post.query.filter_by(user_id=current_user).all()
+    posts = Post.query.order_by(Post.created_at.desc()).all()
+    result = []
+    for post in posts:
+        result.append({
+            'id': post.id,
+            'title': post.title,
+            'content': post.content,
+            'created_at': post.created_at.isoformat(),
+            'user_id': post.user_id,
+            'username': post.author.username
+        })
+    return jsonify(result), 200
 
-    posts = Post.query.all()
-
-    return jsonify([
-        {
-            'id': p.id,
-            'title': p.title,
-            'content': p.content,
-            'user_id': p.user_id,
-            'comments': [{'id': c.id, 'content': c.content, 'user_id': c.user_id} for c in p.comments]
-        } for p in posts
-    ])
 
 @app.route('/posts', methods=['POST'])
-@jwt_required()
+@jwt_required
 def create_post():
-    data = request.get_json()
-    user_id = get_jwt_identity()
-    post = Post(title=data['title'], content=data['content'], user_id=user_id)
-    db.session.add(post)
-    db.session.commit()
-    return jsonify({'message': 'Post created'}), 201
+    data = request.get_json() or {}
+    title = data.get('title', '').strip()
+    content = data.get('content', '').strip()
+    if not title or not content:
+        return jsonify({'error': 'Title и content обязательны'}), 400
 
-@app.route('/posts/<int:post_id>', methods=['PUT'])
-@jwt_required()
-def update_post(post_id):
-    data = request.get_json()
-    post = Post.query.get_or_404(post_id)
-    user_id = get_jwt_identity()
-    if post.user_id != user_id and not is_admin():
-        return jsonify({'message': 'Unauthorized'}), 403
-    post.title = data['title']
-    post.content = data['content']
-    db.session.commit()
-    return jsonify({'message': 'Post updated'})
+    user = User.query.get(request.user_id)
+    if not user:
+        return jsonify({'error': 'Пользователь не найден'}), 404
 
+    new_post = Post(title=title, content=content, user_id=user.id)
+    db.session.add(new_post)
+    db.session.commit()
+    return jsonify({
+        'message': 'Пост успешно создан',
+        'post': {
+            'id': new_post.id,
+            'title': new_post.title,
+            'content': new_post.content,
+            'created_at': new_post.created_at.isoformat(),
+            'user_id': new_post.user_id,
+            'username': user.username
+        }
+    }), 201
+
+
+# Работа с комментариями
+
+@app.route('/posts/<int:post_id>/comments', methods=['GET'])
+def get_comments(post_id):
+    comments = Comment.query.filter_by(post_id=post_id).order_by(Comment.created_at).all()
+    result = []
+    for comment in comments:
+        result.append({
+            'id': comment.id,
+            'content': comment.content,
+            'created_at': comment.created_at.isoformat(),
+            'user_id': comment.user_id,
+            'user_username': comment.author.username
+        })
+    return jsonify(result), 200
+
+
+@app.route('/posts/<int:post_id>/comments', methods=['POST'])
+@jwt_required
+def create_comment(post_id):
+    data = request.get_json() or {}
+    content = data.get('content', '').strip()
+    if not content:
+        return jsonify({'error': 'Content обязательный'}), 400
+
+    user = User.query.get(request.user_id)
+    if not user:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+
+    post = Post.query.get(post_id)
+    if not post:
+        return jsonify({'error': 'Пост не найден'}), 404
+
+    new_comment = Comment(content=content, user_id=user.id, post_id=post.id)
+    db.session.add(new_comment)
+    db.session.commit()
+    return jsonify({
+        'message': 'Комментарий успешно создан',
+        'comment': {
+            'id': new_comment.id,
+            'content': new_comment.content,
+            'created_at': new_comment.created_at.isoformat(),
+            'user_id': new_comment.user_id,
+            'user_username': user.username
+        }
+    }), 201
+
+
+# Удаление поста (только для администратора)
 @app.route('/posts/<int:post_id>', methods=['DELETE'])
-@jwt_required()
+@jwt_required
 def delete_post(post_id):
-    post = Post.query.get_or_404(post_id)
-    user_id = get_jwt_identity()
-    if post.user_id != user_id and not is_admin():
-        return jsonify({'message': 'Unauthorized'}), 403
+    user = User.query.get(request.user_id)
+    if not user or user.role != 'Admin':
+        return jsonify({'error': 'Доступ запрещён'}), 403
+
+    post = Post.query.get(post_id)
+    if not post:
+        return jsonify({'error': 'Пост не найден'}), 404
+
     db.session.delete(post)
     db.session.commit()
-    return jsonify({'message': 'Post deleted'})
+    return jsonify({'message': 'Пост удалён'}), 200
 
-# ---------- CRUD Comments ----------
 
-@app.route('/comments', methods=['POST'])
-@jwt_required()
-def create_comment():
-    data = request.get_json()
-    user_id = get_jwt_identity()
-    comment = Comment(content=data['content'], post_id=data['post_id'], user_id=user_id)
-    db.session.add(comment)
-    db.session.commit()
-    return jsonify({'message': 'Comment created'}), 201
-
-@app.route('/comments/<int:comment_id>', methods=['PUT'])
-@jwt_required()
-def update_comment(comment_id):
-    data = request.get_json()
-    comment = Comment.query.get_or_404(comment_id)
-    user_id = get_jwt_identity()
-    if comment.user_id != user_id and not is_admin():
-        return jsonify({'message': 'Unauthorized'}), 403
-    comment.content = data['content']
-    db.session.commit()
-    return jsonify({'message': 'Comment updated'})
-
+# Удаление комментария (для администратора или автора комментария)
 @app.route('/comments/<int:comment_id>', methods=['DELETE'])
-@jwt_required()
+@jwt_required
 def delete_comment(comment_id):
-    comment = Comment.query.get_or_404(comment_id)
-    user_id = get_jwt_identity()
-    if comment.user_id != user_id and not is_admin():
-        return jsonify({'message': 'Unauthorized'}), 403
+    comment = Comment.query.get(comment_id)
+    if not comment:
+        return jsonify({'error': 'Комментарий не найден'}), 404
+
+    user = User.query.get(request.user_id)
+    if not user or (user.role != 'Admin' and comment.user_id != user.id):
+        return jsonify({'error': 'Доступ запрещён'}), 403
+
     db.session.delete(comment)
     db.session.commit()
-    return jsonify({'message': 'Comment deleted'})
+    return jsonify({'message': 'Комментарий удалён'}), 200
 
-@app.route('/commments/<int:post_id>', methods=['GET'])
-def get_comment(post_id):
-    comment = Comment.query.get_or_404(post_id)
-    return jsonify({'message': 'Comment found'})
-
-
-# ---------- Main ----------
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
+    # При первом запуске для создания базы данных, если требуется:
+    # with app.app_context():
+    #     db.drop_all()  # если нужно сбросить схему
+    #     db.create_all()
     app.run(debug=True)
