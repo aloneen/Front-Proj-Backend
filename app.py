@@ -46,6 +46,9 @@ class Comment(db.Model):
 def jwt_required(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
+        # Пропускаем preflight OPTIONS‑запрос
+        if request.method == 'OPTIONS':
+            return jsonify({}), 200
         auth_header = request.headers.get('Authorization', None)
         if auth_header is None or not auth_header.startswith("Bearer "):
             return jsonify({'error': 'Token is missing'}), 401
@@ -58,8 +61,8 @@ def jwt_required(func):
             return jsonify({'error': 'Invalid token'}), 401
         request.user_id = payload['user_id']
         return func(*args, **kwargs)
-
     return wrapper
+
 
 
 # Эндпоинты для аутентификации
@@ -259,6 +262,38 @@ def admin_delete_user(user_id):
     db.session.delete(user_to_delete)
     db.session.commit()
     return jsonify({'message': 'Пользователь удалён'}), 200
+
+
+@app.route('/posts/<int:post_id>', methods=['DELETE', 'OPTIONS'])
+@jwt_required
+def delete_post(post_id):
+    user = User.query.get(request.user_id)
+    if not user or user.role != 'Admin':
+        return jsonify({'error': 'Доступ запрещён'}), 403
+
+    post = Post.query.get(post_id)
+    if not post:
+        return jsonify({'error': 'Пост не найден'}), 404
+
+    db.session.delete(post)
+    db.session.commit()
+    return jsonify({'message': 'Пост удалён'}), 200
+
+@app.route('/comments/<int:comment_id>', methods=['DELETE', 'OPTIONS'])
+@jwt_required
+def delete_comment(comment_id):
+    comment = Comment.query.get(comment_id)
+    if not comment:
+        return jsonify({'error': 'Комментарий не найден'}), 404
+
+    user = User.query.get(request.user_id)
+    if not user or (user.role != 'Admin' and comment.user_id != user.id):
+        return jsonify({'error': 'Доступ запрещён'}), 403
+
+    db.session.delete(comment)
+    db.session.commit()
+    return jsonify({'message': 'Комментарий удалён'}), 200
+
 
 
 if __name__ == '__main__':
