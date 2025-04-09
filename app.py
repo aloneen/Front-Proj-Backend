@@ -14,23 +14,23 @@ db = SQLAlchemy(app)
 CORS(app, supports_credentials=True)
 
 
-# Модели
+# Обновлённые модели с каскадным удалением
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
     role = db.Column(db.String(20), default='User')
-    posts = db.relationship('Post', backref='author', lazy=True)
-    comments = db.relationship('Comment', backref='author', lazy=True)
+    posts = db.relationship('Post', backref='author', lazy=True, cascade="all, delete-orphan")
+    comments = db.relationship('Comment', backref='author', lazy=True, cascade="all, delete-orphan")
 
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)  # Новый столбец
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     comments = db.relationship('Comment', backref='post', lazy=True)
 
 
@@ -38,8 +38,8 @@ class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id', ondelete='CASCADE'), nullable=False)
 
 
 # Декоратор для проверки JWT-токена
@@ -56,14 +56,13 @@ def jwt_required(func):
             return jsonify({'error': 'Token expired'}), 401
         except jwt.InvalidTokenError:
             return jsonify({'error': 'Invalid token'}), 401
-        # Сохраняем user_id в request, чтобы использовать в эндпоинте
         request.user_id = payload['user_id']
         return func(*args, **kwargs)
 
     return wrapper
 
 
-# Эндпоинты аутентификации и регистрации
+# Эндпоинты для аутентификации
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -103,7 +102,6 @@ def login():
 
     user = User.query.filter_by(email=email).first()
     if user and check_password_hash(user.password, password):
-        # Генерируем токен с истечением через 1 час
         token = jwt.encode(
             {'user_id': user.id, 'exp': datetime.utcnow() + timedelta(hours=1)},
             app.config['SECRET_KEY'], algorithm='HS256'
@@ -122,7 +120,6 @@ def login():
         return jsonify({'error': 'Неверные учетные данные'}), 401
 
 
-# Эндпоинт для получения текущего пользователя (требует JWT)
 @app.route('/user', methods=['GET'])
 @jwt_required
 def get_current_user():
@@ -139,21 +136,19 @@ def get_current_user():
     }), 200
 
 
-# Работа с постами
+# Эндпоинты для постов и комментариев (без изменений)
 
 @app.route('/posts', methods=['GET'])
 def get_posts():
     posts = Post.query.order_by(Post.created_at.desc()).all()
-    result = []
-    for post in posts:
-        result.append({
-            'id': post.id,
-            'title': post.title,
-            'content': post.content,
-            'created_at': post.created_at.isoformat(),
-            'user_id': post.user_id,
-            'username': post.author.username
-        })
+    result = [{
+        'id': post.id,
+        'title': post.title,
+        'content': post.content,
+        'created_at': post.created_at.isoformat(),
+        'user_id': post.user_id,
+        'username': post.author.username
+    } for post in posts]
     return jsonify(result), 200
 
 
@@ -186,20 +181,16 @@ def create_post():
     }), 201
 
 
-# Работа с комментариями
-
 @app.route('/posts/<int:post_id>/comments', methods=['GET'])
 def get_comments(post_id):
     comments = Comment.query.filter_by(post_id=post_id).order_by(Comment.created_at).all()
-    result = []
-    for comment in comments:
-        result.append({
-            'id': comment.id,
-            'content': comment.content,
-            'created_at': comment.created_at.isoformat(),
-            'user_id': comment.user_id,
-            'user_username': comment.author.username
-        })
+    result = [{
+        'id': comment.id,
+        'content': comment.content,
+        'created_at': comment.created_at.isoformat(),
+        'user_id': comment.user_id,
+        'user_username': comment.author.username
+    } for comment in comments]
     return jsonify(result), 200
 
 
@@ -234,43 +225,45 @@ def create_comment(post_id):
     }), 201
 
 
-# Удаление поста (только для администратора)
-@app.route('/posts/<int:post_id>', methods=['DELETE'])
+# Эндпоинты для администратора
+
+@app.route('/users', methods=['GET'])
 @jwt_required
-def delete_post(post_id):
-    user = User.query.get(request.user_id)
-    if not user or user.role != 'Admin':
-        return jsonify({'error': 'Доступ запрещён'}), 403
+def get_users():
+    current_user = User.query.get(request.user_id)
+    if not current_user or current_user.role != 'Admin':
+        return jsonify(
+            {'error': 'Доступ запрещён. Только администратор может просматривать список пользователей.'}), 403
 
-    post = Post.query.get(post_id)
-    if not post:
-        return jsonify({'error': 'Пост не найден'}), 404
+    users = User.query.all()
+    result = [{
+        'id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'role': user.role
+    } for user in users]
+    return jsonify(result), 200
 
-    db.session.delete(post)
-    db.session.commit()
-    return jsonify({'message': 'Пост удалён'}), 200
 
-
-# Удаление комментария (для администратора или автора комментария)
-@app.route('/comments/<int:comment_id>', methods=['DELETE'])
+@app.route('/users/<int:user_id>', methods=['DELETE'])
 @jwt_required
-def delete_comment(comment_id):
-    comment = Comment.query.get(comment_id)
-    if not comment:
-        return jsonify({'error': 'Комментарий не найден'}), 404
+def admin_delete_user(user_id):
+    current_user = User.query.get(request.user_id)
+    if not current_user or current_user.role != 'Admin':
+        return jsonify({'error': 'Доступ запрещён. Только администратор может удалять пользователей.'}), 403
 
-    user = User.query.get(request.user_id)
-    if not user or (user.role != 'Admin' and comment.user_id != user.id):
-        return jsonify({'error': 'Доступ запрещён'}), 403
+    user_to_delete = User.query.get(user_id)
+    if not user_to_delete:
+        return jsonify({'error': 'Пользователь не найден'}), 404
 
-    db.session.delete(comment)
+    db.session.delete(user_to_delete)
     db.session.commit()
-    return jsonify({'message': 'Комментарий удалён'}), 200
+    return jsonify({'message': 'Пользователь удалён'}), 200
 
 
 if __name__ == '__main__':
-    # При первом запуске для создания базы данных, если требуется:
+    # Для первого запуска, если необходимо создать базу данных, раскомментируйте:
     # with app.app_context():
-    #     db.drop_all()  # если нужно сбросить схему
+    #     db.drop_all()
     #     db.create_all()
     app.run(debug=True)
