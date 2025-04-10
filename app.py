@@ -16,7 +16,6 @@ CORS(app,
      supports_credentials=True
 )
 
-# Обновлённые модели с каскадным удалением
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -44,7 +43,6 @@ class Comment(db.Model):
     post_id = db.Column(db.Integer, db.ForeignKey('post.id', ondelete='CASCADE'), nullable=False)
 
 
-# Декоратор для проверки JWT-токена
 def jwt_required(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -66,8 +64,6 @@ def jwt_required(func):
     return wrapper
 
 
-
-# Эндпоинты для аутентификации
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -141,7 +137,6 @@ def get_current_user():
     }), 200
 
 
-# Эндпоинты для постов и комментариев (без изменений)
 
 @app.route('/posts', methods=['GET'])
 def get_posts():
@@ -297,8 +292,6 @@ def delete_comment(comment_id):
     if not user:
         return jsonify({'error': 'Доступ запрещён'}), 403
 
-    # Разрешаем удаление, если пользователь имеет роль Admin или Moderator,
-    # либо если пользователь является автором комментария
     if user.role not in ['Admin', 'Moderator'] and comment.user_id != user.id:
         return jsonify({'error': 'Доступ запрещён'}), 403
 
@@ -325,11 +318,10 @@ def update_post(post_id):
         return jsonify({'error': 'Пост не найден'}), 404
 
     user = User.query.get(request.user_id)
-    # Проверка роли: автор поста или админ
+
     if not user or (user.role != 'Admin' and post.user_id != user.id):
         return jsonify({'error': 'Доступ запрещён'}), 403
 
-    # Обновляем поля
     post.title = new_title
     post.content = new_content
     db.session.commit()
@@ -349,7 +341,6 @@ def update_post(post_id):
 @app.route('/comments', methods=['GET'])
 @jwt_required
 def get_all_comments():
-    # Проверяем, что текущий пользователь имеет роль Admin или Moderator
     user = User.query.get(request.user_id)
     if not user or user.role not in ['Admin', 'Moderator']:
         return jsonify({'error': 'Доступ запрещён. Только администратор или модератор могут просматривать комментарии.'}), 403
