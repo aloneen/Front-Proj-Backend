@@ -775,6 +775,31 @@ def delete_category(cat_id):
     return jsonify({'message': 'Category deleted'}), 200
 
 
+# Change a user’s role (Admin only)
+@app.route('/users/<int:user_id>/role', methods=['PUT','OPTIONS'])
+@jwt_required
+def change_user_role(user_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    current = User.query.get(request.user_id)
+    if not current or current.role != 'Admin':
+        return jsonify({'error': 'Forbidden'}), 403
+
+    data = request.get_json() or {}
+    new_role = data.get('role', '').strip()
+    if new_role not in ['User', 'Moderator', 'Admin']:
+        return jsonify({'error': 'Invalid role'}), 400
+
+    user = User.query.get_or_404(user_id)
+    user.role = new_role
+    db.session.commit()
+    return jsonify({'id': user.id, 'role': user.role}), 200
+
+
+
+
+
 if __name__ == '__main__':
     # Для первого запуска, если необходимо создать базу данных, раскомментируйте:
 
