@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_jwt_extended import get_jwt_identity
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from datetime import datetime, timedelta
@@ -16,6 +17,14 @@ CORS(app,
      supports_credentials=True
 )
 
+
+# Likes table (many-to-many)
+likes = db.Table('likes',
+    db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True),
+    db.Column('post_id', db.Integer, db.ForeignKey('post.id'), primary_key=True)
+)
+
+
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -28,12 +37,13 @@ class User(db.Model):
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(200), nullable=False)
+    title = db.Column(db.String(150), nullable=False)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
-    comments = db.relationship('Comment', backref='post', lazy=True, cascade="all, delete-orphan")
-
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    category_id = db.Column(db.Integer, db.ForeignKey('category.id'))
+    comments = db.relationship('Comment', backref='post', lazy=True, cascade='all, delete-orphan')
+    likers = db.relationship('User', secondary=likes, backref='liked_posts')
 
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -41,6 +51,14 @@ class Comment(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     post_id = db.Column(db.Integer, db.ForeignKey('post.id', ondelete='CASCADE'), nullable=False)
+
+
+# Category model
+class Category(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    posts = db.relationship('Post', backref='category', lazy=True)
+
 
 
 def jwt_required(func):
@@ -147,38 +165,63 @@ def get_posts():
         'content': post.content,
         'created_at': post.created_at.isoformat(),
         'user_id': post.user_id,
-        'username': post.author.username
+        'username': post.author.username,
+        'category_id': post.category_id,  # ← add this
+        'category_name': post.category.name if post.category else None
     } for post in posts]
     return jsonify(result), 200
 
 
-@app.route('/posts', methods=['POST'])
+@app.route('/posts', methods=['POST', 'OPTIONS'])
 @jwt_required
 def create_post():
-    data = request.get_json() or {}
-    title = data.get('title', '').strip()
-    content = data.get('content', '').strip()
-    if not title or not content:
-        return jsonify({'error': 'Title и content обязательны'}), 400
+    # allow CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
 
+    data = request.get_json() or {}
+    title       = data.get('title', '').strip()
+    content     = data.get('content', '').strip()
+    category_id = data.get('category_id')
+
+    # validate all fields
+    if not title or not content or category_id is None:
+        return jsonify({'error': 'Title, content и category_id обязательны'}), 400
+
+    # find user
     user = User.query.get(request.user_id)
     if not user:
         return jsonify({'error': 'Пользователь не найден'}), 404
 
-    new_post = Post(title=title, content=content, user_id=user.id)
+    # find category
+    category = Category.query.get(category_id)
+    if not category:
+        return jsonify({'error': 'Категория не найдена'}), 404
+
+    # create post
+    new_post = Post(
+        title=title,
+        content=content,
+        user_id=user.id,
+        category_id=category.id
+    )
     db.session.add(new_post)
     db.session.commit()
+
     return jsonify({
         'message': 'Пост успешно создан',
         'post': {
-            'id': new_post.id,
-            'title': new_post.title,
-            'content': new_post.content,
-            'created_at': new_post.created_at.isoformat(),
-            'user_id': new_post.user_id,
-            'username': user.username
+            'id':            new_post.id,
+            'title':         new_post.title,
+            'content':       new_post.content,
+            'category_id':   category.id,
+            'category_name': category.name,
+            'created_at':    new_post.created_at.isoformat(),
+            'user_id':       new_post.user_id,
+            'username':      user.username
         }
     }), 201
+
 
 
 @app.route('/posts/<int:post_id>/comments', methods=['GET'])
@@ -303,38 +346,52 @@ def delete_comment(comment_id):
 @app.route('/posts/<int:post_id>', methods=['PUT', 'OPTIONS'])
 @jwt_required
 def update_post(post_id):
+    # allow CORS preflight
     if request.method == 'OPTIONS':
-        return {}, 200  # preflight
+        return jsonify({}), 200
 
     data = request.get_json() or {}
-    new_title = data.get('title', '').strip()
-    new_content = data.get('content', '').strip()
+    new_title      = data.get('title', '').strip()
+    new_content    = data.get('content', '').strip()
+    new_category_id = data.get('category_id')
 
-    if not new_title or not new_content:
-        return jsonify({'error': 'Title и Content обязательны'}), 400
+    # validate all fields
+    if not new_title or not new_content or new_category_id is None:
+        return jsonify({'error': 'Title, content и category_id обязательны'}), 400
 
+    # load post
     post = Post.query.get(post_id)
     if not post:
         return jsonify({'error': 'Пост не найден'}), 404
 
+    # permission check
     user = User.query.get(request.user_id)
-
     if not user or (user.role != 'Admin' and post.user_id != user.id):
         return jsonify({'error': 'Доступ запрещён'}), 403
 
-    post.title = new_title
-    post.content = new_content
+    # find new category
+    category = Category.query.get(new_category_id)
+    if not category:
+        return jsonify({'error': 'Категория не найдена'}), 404
+
+    # apply updates
+    post.title       = new_title
+    post.content     = new_content
+    post.category_id = category.id
     db.session.commit()
 
     return jsonify({
         'message': 'Пост успешно обновлён',
         'post': {
-            'id': post.id,
-            'title': post.title,
-            'content': post.content,
-            'created_at': post.created_at.isoformat(),
-            'user_id': post.user_id,
-            'username': post.author.username
+            'id':            post.id,
+            'title':         post.title,
+            'content':       post.content,
+            'category_id':   category.id,
+            'category_name': category.name,
+            'created_at':    post.created_at.isoformat(),
+            'updated_at':    post.updated_at.isoformat() if hasattr(post, 'updated_at') else None,
+            'user_id':       post.user_id,
+            'username':      post.author.username
         }
     }), 200
 
@@ -357,10 +414,67 @@ def get_all_comments():
     return jsonify(result), 200
 
 
+# Fetch all categories
+@app.route('/categories', methods=['GET'])
+def get_categories():
+    return jsonify([{'id': c.id, 'name': c.name} for c in Category.query.all()])
+
+@app.route('/posts/<int:post_id>/like', methods=['POST'])
+@jwt_required                    # ← ensure this is here
+def like_post(post_id):
+    user_id = request.user_id    # now safe to call
+    post = Post.query.get_or_404(post_id)
+    user = User.query.get(user_id)
+    if user in post.likers:
+        return jsonify({'message': 'Already liked'}), 400
+    post.likers.append(user)
+    db.session.commit()
+    return jsonify({'message': 'Liked'}), 200
+
+# Unlike a post
+@app.route('/posts/<int:post_id>/unlike', methods=['DELETE'])
+@jwt_required                   # ← and also here
+def unlike_post(post_id):
+    user_id = request.user_id
+    post = Post.query.get_or_404(post_id)
+    user = User.query.get(user_id)
+    if user not in post.likers:
+        return jsonify({'message': 'Not liked yet'}), 400
+    post.likers.remove(user)
+    db.session.commit()
+    return jsonify({'message': 'Unliked'}), 200
+
+# Get post likes count
+@app.route('/posts/<int:post_id>/likes', methods=['GET'])
+def get_post_likes(post_id):
+    post = Post.query.get_or_404(post_id)
+    # total count
+    count = len(post.likers)
+    # default to not liked
+    liked = False
+
+    # check for an Authorization header
+    auth_header = request.headers.get('Authorization', None)
+    if auth_header and auth_header.startswith('Bearer '):
+        token = auth_header.split(' ')[1]
+        try:
+            # decode with your same SECRET_KEY
+            payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            user = User.query.get(payload['user_id'])
+            if user and user in post.likers:
+                liked = True
+        except jwt.PyJWTError:
+            # expired/invalid token → treat as not‑logged‑in
+            pass
+
+    # return both count and liked to match your Redux slice
+    return jsonify({
+        'likes': count,
+        'liked': liked
+    }), 200
+
 
 if __name__ == '__main__':
     # Для первого запуска, если необходимо создать базу данных, раскомментируйте:
-    # with app.app_context():
-    #     db.drop_all()
-    #     db.create_all()
+
     app.run(debug=True)
