@@ -4,8 +4,18 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
+
+from flask import Flask, request, jsonify, url_for, send_from_directory, abort
+from werkzeug.utils import secure_filename
+
+
 import jwt
 from functools import wraps
+
+import os
+import uuid
+
+
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///postit.db'
@@ -16,6 +26,20 @@ CORS(app,
      resources={r"*": {"origins": "*", "methods": ["GET","POST","PUT","DELETE","OPTIONS"]}},
      supports_credentials=True
 )
+
+
+
+BASE_UPLOAD = os.path.join(app.root_path, 'static', 'uploads')
+POSTS_UPLOAD = os.path.join(BASE_UPLOAD, 'posts')
+AVATARS_UPLOAD = os.path.join(BASE_UPLOAD, 'avatars')
+ALLOWED_EXT = {'png','jpg','jpeg','gif'}
+
+
+for d in (POSTS_UPLOAD, AVATARS_UPLOAD):
+    os.makedirs(d, exist_ok=True)
+
+def allowed_file(fn):
+    return '.' in fn and fn.rsplit('.',1)[1].lower() in ALLOWED_EXT
 
 
 # Likes table (many-to-many)
@@ -33,7 +57,7 @@ class User(db.Model):
     role = db.Column(db.String(20), default='User')
     posts = db.relationship('Post', backref='author', lazy=True, cascade="all, delete-orphan")
     comments = db.relationship('Comment', backref='author', lazy=True, cascade="all, delete-orphan")
-
+    avatar = db.Column(db.String(256), nullable=True)
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -51,6 +75,13 @@ class Comment(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     post_id = db.Column(db.Integer, db.ForeignKey('post.id', ondelete='CASCADE'), nullable=False)
+
+
+class PostImage(db.Model):
+    id      = db.Column(db.Integer, primary_key=True)
+    filename= db.Column(db.String(256), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id', ondelete='CASCADE'), nullable=False)
+    post    = db.relationship('Post', backref=db.backref('images', lazy=True))
 
 
 # Category model
@@ -81,6 +112,75 @@ def jwt_required(func):
         return func(*args, **kwargs)
     return wrapper
 
+
+
+
+
+@app.route('/uploads/<folder>/<filename>')
+def uploaded_file(folder, filename):
+    if folder == 'posts':
+        directory = POSTS_UPLOAD
+    elif folder == 'avatars':
+        directory = AVATARS_UPLOAD
+    else:
+        return abort(404)
+    return send_from_directory(directory, filename)
+
+
+
+@app.route('/posts/<int:post_id>/images', methods=['POST','OPTIONS'])
+@jwt_required
+def upload_post_images(post_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    post = Post.query.get_or_404(post_id)
+    if not request.files.getlist('images'):
+        return jsonify({'error': 'No images provided'}), 400
+
+    urls = []
+    for file in request.files.getlist('images'):
+        if file and allowed_file(file.filename):
+            fn = secure_filename(file.filename)
+            unique = f"{uuid.uuid4().hex}_{fn}"
+            path = os.path.join(POSTS_UPLOAD, unique)
+            file.save(path)
+
+            img = PostImage(filename=unique, post_id=post.id)
+            db.session.add(img)
+            urls.append(
+            url_for('uploaded_file', folder='posts', filename=unique, _external=True)
+            )
+
+    db.session.commit()
+    return jsonify({'images': urls}), 201
+
+
+
+
+
+
+@app.route('/user/avatar', methods=['POST','OPTIONS'])
+@jwt_required
+def upload_avatar():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    file = request.files.get('avatar')
+    if not file or not allowed_file(file.filename):
+        return jsonify({'error': 'Invalid or missing avatar file'}), 400
+
+    fn = secure_filename(file.filename)
+    unique = f"{uuid.uuid4().hex}_{fn}"
+    path = os.path.join(AVATARS_UPLOAD, unique)
+    file.save(path)
+
+    user = User.query.get(request.user_id)
+    user.avatar = unique
+    db.session.commit()
+
+    url = url_for('uploaded_file', folder='avatars', filename=unique, _external=True)
+    return jsonify({'avatar_url': url}), 200
 
 
 @app.route('/register', methods=['POST'])
@@ -167,9 +267,34 @@ def get_posts():
         'user_id': post.user_id,
         'username': post.author.username,
         'category_id': post.category_id,  # ← add this
-        'category_name': post.category.name if post.category else None
+        'category_name': post.category.name if post.category else None,
+        'images': [
+            url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
+            for img in post.images
+        ]
     } for post in posts]
     return jsonify(result), 200
+
+
+
+
+@app.route('/posts/<int:post_id>', methods=['GET'])
+def get_post_detail(post_id):
+    p = Post.query.get_or_404(post_id)
+    return jsonify({
+        'id': p.id,
+        'title': p.title,
+        'content': p.content,
+        'category_id': p.category_id,
+        'category_name': p.category.name if p.category else None,
+        'created_at': p.created_at.isoformat(),
+        'user_id': p.user_id,
+        'username': p.author.username,
+        'images': [
+          url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
+          for img in p.images
+        ]
+    }), 200
 
 
 @app.route('/posts', methods=['POST', 'OPTIONS'])
@@ -474,7 +599,43 @@ def get_post_likes(post_id):
     }), 200
 
 
+
+@app.route('/user/profile', methods=['GET'])
+@jwt_required
+def user_profile():
+    u = User.query.get_or_404(request.user_id)
+    avatar_url = None
+    if u.avatar:
+        avatar_url = url_for('uploaded_file', folder='avatars', filename=u.avatar, _external=True)
+
+    user_posts = []
+    for p in u.posts:
+        user_posts.append({
+            'id': p.id,
+            'title': p.title,
+            'images': [
+              url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
+              for img in p.images
+            ]
+        })
+
+    return jsonify({
+        'user': {
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'role': u.role,
+            'avatar_url': avatar_url
+        },
+        'posts': user_posts
+    }), 200
+
+
 if __name__ == '__main__':
     # Для первого запуска, если необходимо создать базу данных, раскомментируйте:
+
+    with app.app_context():
+        db.drop_all()
+        db.create_all()
 
     app.run(debug=True)
