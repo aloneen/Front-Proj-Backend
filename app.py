@@ -114,6 +114,12 @@ def jwt_required(func):
 
 
 
+def avatar_url_for(user):
+    if not user.avatar:
+        return None
+    return url_for('uploaded_file', folder='avatars', filename=user.avatar, _external=True)
+
+
 
 
 @app.route('/uploads/<folder>/<filename>')
@@ -271,7 +277,8 @@ def get_posts():
         'images': [
             url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
             for img in post.images
-        ]
+        ],
+        'author_avatar': avatar_url_for(post.author)
     } for post in posts]
     return jsonify(result), 200
 
@@ -293,7 +300,8 @@ def get_post_detail(post_id):
         'images': [
           url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
           for img in p.images
-        ]
+        ],
+        'author_avatar': avatar_url_for(p.author)
     }), 200
 
 
@@ -357,7 +365,8 @@ def get_comments(post_id):
         'content': comment.content,
         'created_at': comment.created_at.isoformat(),
         'user_id': comment.user_id,
-        'user_username': comment.author.username
+        'user_username': comment.author.username,
+        'user_avatar': avatar_url_for(comment.author)
     } for comment in comments]
     return jsonify(result), 200
 
@@ -381,6 +390,12 @@ def create_comment(post_id):
     new_comment = Comment(content=content, user_id=user.id, post_id=post.id)
     db.session.add(new_comment)
     db.session.commit()
+
+    # build avatar URL
+    avatar_url = None
+    if user.avatar:
+        avatar_url = url_for('uploaded_file', folder='avatars', filename=user.avatar, _external=True)
+
     return jsonify({
         'message': 'Комментарий успешно создан',
         'comment': {
@@ -388,9 +403,11 @@ def create_comment(post_id):
             'content': new_comment.content,
             'created_at': new_comment.created_at.isoformat(),
             'user_id': new_comment.user_id,
-            'user_username': user.username
+            'user_username': user.username,
+            'user_avatar': avatar_url     # ← include this
         }
     }), 201
+
 
 
 # Эндпоинты для администратора
@@ -631,11 +648,40 @@ def user_profile():
     }), 200
 
 
+
+@app.route('/posts/<int:post_id>/images/<int:image_id>', methods=['DELETE','OPTIONS'])
+@jwt_required
+def delete_post_image(post_id, image_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    img = PostImage.query.get_or_404(image_id)
+    if img.post_id != post_id:
+        return jsonify({'error': 'Image doesn’t belong to that post'}), 400
+
+    # permission: only the post’s author or admin
+    user = User.query.get(request.user_id)
+    post = Post.query.get(post_id)
+    if user.role != 'Admin' and post.user_id != user.id:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    # delete file from disk
+    try:
+        os.remove(os.path.join(POSTS_UPLOAD, img.filename))
+    except OSError:
+        pass
+
+    db.session.delete(img)
+    db.session.commit()
+    return jsonify({'message': 'Image deleted'}), 200
+
+
+
 if __name__ == '__main__':
     # Для первого запуска, если необходимо создать базу данных, раскомментируйте:
 
-    with app.app_context():
-        db.drop_all()
-        db.create_all()
+    # with app.app_context():
+    #     db.drop_all()
+    #     db.create_all()
 
     app.run(debug=True)
