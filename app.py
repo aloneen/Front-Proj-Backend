@@ -58,6 +58,7 @@ class User(db.Model):
     posts = db.relationship('Post', backref='author', lazy=True, cascade="all, delete-orphan")
     comments = db.relationship('Comment', backref='author', lazy=True, cascade="all, delete-orphan")
     avatar = db.Column(db.String(256), nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -97,24 +98,61 @@ class Category(db.Model):
     posts = db.relationship('Post', backref='category', lazy=True)
 
 
+#
+# def jwt_required(func):
+#     @wraps(func)
+#     def wrapper(*args, **kwargs):
+#         # Пропускаем preflight OPTIONS‑запрос
+#         if request.method == 'OPTIONS':
+#             return jsonify({}), 200
+#         auth_header = request.headers.get('Authorization', None)
+#         if auth_header is None or not auth_header.startswith("Bearer "):
+#             return jsonify({'error': 'Token is missing'}), 401
+#         token = auth_header.split(" ")[1]
+#         try:
+#             payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+#         except jwt.ExpiredSignatureError:
+#             return jsonify({'error': 'Token expired'}), 401
+#         except jwt.InvalidTokenError:
+#             return jsonify({'error': 'Invalid token'}), 401
+#         request.user_id = payload['user_id']
+#         return func(*args, **kwargs)
+#
+#         request.user_id = payload['user_id']
+#         user = User.query.get(request.user_id)
+#         if not user or not user.is_active:
+#             return jsonify({'error': 'Account inactive'}), 403
+#         return func(*args, **kwargs)
+#     return wrapper
 
 def jwt_required(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # Пропускаем preflight OPTIONS‑запрос
+        # allow CORS preflight
         if request.method == 'OPTIONS':
             return jsonify({}), 200
+
         auth_header = request.headers.get('Authorization', None)
-        if auth_header is None or not auth_header.startswith("Bearer "):
+        if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({'error': 'Token is missing'}), 401
-        token = auth_header.split(" ")[1]
+
+        token = auth_header.split(' ')[1]
         try:
             payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token expired'}), 401
         except jwt.InvalidTokenError:
             return jsonify({'error': 'Invalid token'}), 401
-        request.user_id = payload['user_id']
+
+        # load the user
+        user = User.query.get(payload['user_id'])
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        if not user.is_active:
+            return jsonify({'error': 'Account is banned'}), 403
+
+        # stash the id for downstream handlers
+        request.user_id = user.id
         return func(*args, **kwargs)
     return wrapper
 
@@ -222,6 +260,35 @@ def register():
     }), 201
 
 
+# @app.route('/login', methods=['POST'])
+# def login():
+#     data = request.get_json() or {}
+#     email = data.get('email', '').strip()
+#     password = data.get('password', '')
+#
+#     if not email or not password:
+#         return jsonify({'error': 'Email и password обязательны'}), 400
+#
+#     user = User.query.filter_by(email=email).first()
+#     if user and check_password_hash(user.password, password):
+#         token = jwt.encode(
+#             {'user_id': user.id, 'exp': datetime.utcnow() + timedelta(hours=1)},
+#             app.config['SECRET_KEY'], algorithm='HS256'
+#         )
+#         return jsonify({
+#             'message': 'Вход успешен',
+#             'user': {
+#                 'id': user.id,
+#                 'username': user.username,
+#                 'email': user.email,
+#                 'role': user.role
+#             },
+#             'token': token
+#         }), 200
+#     else:
+#         return jsonify({'error': 'Неверные учетные данные'}), 401
+
+
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json() or {}
@@ -232,7 +299,14 @@ def login():
         return jsonify({'error': 'Email и password обязательны'}), 400
 
     user = User.query.filter_by(email=email).first()
-    if user and check_password_hash(user.password, password):
+    if not user:
+        return jsonify({'error': 'Неверные учетные данные'}), 401
+
+    # ---- new: ban check ----
+    if not user.is_active:
+        return jsonify({'error': 'Ваш аккаунт заблокирован'}), 403
+
+    if check_password_hash(user.password, password):
         token = jwt.encode(
             {'user_id': user.id, 'exp': datetime.utcnow() + timedelta(hours=1)},
             app.config['SECRET_KEY'], algorithm='HS256'
@@ -447,7 +521,8 @@ def get_users():
         'id': user.id,
         'username': user.username,
         'email': user.email,
-        'role': user.role
+        'role': user.role,
+        'is_active': user.is_active
     } for user in users]
     return jsonify(result), 200
 
@@ -796,6 +871,27 @@ def change_user_role(user_id):
     db.session.commit()
     return jsonify({'id': user.id, 'role': user.role}), 200
 
+
+
+@app.route('/users/<int:user_id>/active', methods=['PUT','OPTIONS'])
+@jwt_required
+def set_user_active(user_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    current = User.query.get(request.user_id)
+    if current.role != 'Admin':
+        return jsonify({'error': 'Forbidden'}), 403
+
+    data = request.get_json() or {}
+    is_active = data.get('is_active')
+    if not isinstance(is_active, bool):
+        return jsonify({'error': 'is_active must be true or false'}), 400
+
+    user = User.query.get_or_404(user_id)
+    user.is_active = is_active
+    db.session.commit()
+    return jsonify({'id': user.id, 'is_active': user.is_active}), 200
 
 
 
