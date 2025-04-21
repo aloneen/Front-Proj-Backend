@@ -69,6 +69,13 @@ class Post(db.Model):
     comments = db.relationship('Comment', backref='post', lazy=True, cascade='all, delete-orphan')
     likers = db.relationship('User', secondary=likes, backref='liked_posts')
 
+    images = db.relationship(
+        'PostImage',
+        backref = db.backref('post', lazy=True),
+        cascade = 'all, delete-orphan',
+        passive_deletes = True
+    )
+
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.Text, nullable=False)
@@ -81,7 +88,6 @@ class PostImage(db.Model):
     id      = db.Column(db.Integer, primary_key=True)
     filename= db.Column(db.String(256), nullable=False)
     post_id = db.Column(db.Integer, db.ForeignKey('post.id', ondelete='CASCADE'), nullable=False)
-    post    = db.relationship('Post', backref=db.backref('images', lazy=True))
 
 
 # Category model
@@ -275,7 +281,15 @@ def get_posts():
         'category_id': post.category_id,  # ← add this
         'category_name': post.category.name if post.category else None,
         'images': [
-            url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
+            {
+                'id':  img.id,
+                'url': url_for(
+                    'uploaded_file',
+                    folder='posts',
+                    filename=img.filename,
+                    _external=True
+                )
+            }
             for img in post.images
         ],
         'author_avatar': avatar_url_for(post.author)
@@ -298,8 +312,16 @@ def get_post_detail(post_id):
         'user_id': p.user_id,
         'username': p.author.username,
         'images': [
-          url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
-          for img in p.images
+            {
+                'id':  img.id,
+                'url': url_for(
+                    'uploaded_file',
+                    folder='posts',
+                    filename=img.filename,
+                    _external=True
+                )
+            }
+            for img in p.images
         ],
         'author_avatar': avatar_url_for(p.author)
     }), 200
@@ -625,14 +647,33 @@ def user_profile():
     if u.avatar:
         avatar_url = url_for('uploaded_file', folder='avatars', filename=u.avatar, _external=True)
 
+    # user_posts = []
+    # for p in u.posts:
+    #     user_posts.append({
+    #         'id': p.id,
+    #         'title': p.title,
+    #         'images': [
+    #           url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
+    #           for img in p.images
+    #         ]
+    #     })
+    #
     user_posts = []
+
     for p in u.posts:
         user_posts.append({
             'id': p.id,
             'title': p.title,
+            # send id+url pairs just like /posts
             'images': [
-              url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
-              for img in p.images
+            {
+                'id': img.id,
+                'url': url_for('uploaded_file',
+                folder = 'posts',
+                filename = img.filename,
+                _external = True)
+            }
+            for img in p.images
             ]
         })
 
