@@ -578,10 +578,50 @@ def get_all_comments():
     return jsonify(result), 200
 
 
-# Fetch all categories
+
 @app.route('/categories', methods=['GET'])
 def get_categories():
     return jsonify([{'id': c.id, 'name': c.name} for c in Category.query.all()])
+
+
+# in app.py
+
+@app.route('/categories', methods=['GET', 'POST', 'OPTIONS'])
+@jwt_required  # you can make this optional for GET if you like
+def handle_categories():
+    # CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    # GET: list all categories
+    if request.method == 'GET':
+        cats = Category.query.all()
+        return jsonify([{'id': c.id, 'name': c.name} for c in cats]), 200
+
+    # POST: create a new category
+    # permission: only Admin or Moderator
+    user = User.query.get(request.user_id)
+    if user.role not in ['Admin', 'Moderator']:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    data = request.get_json() or {}
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'error': 'Name is required'}), 400
+    if Category.query.filter_by(name=name).first():
+        return jsonify({'error': 'Category already exists'}), 400
+
+    cat = Category(name=name)
+    db.session.add(cat)
+    db.session.commit()
+    return jsonify({'id': cat.id, 'name': cat.name}), 201
+
+
+
+
+
+
+
 
 @app.route('/posts/<int:post_id>/like', methods=['POST'])
 @jwt_required                    # ← ensure this is here
@@ -716,6 +756,23 @@ def delete_post_image(post_id, image_id):
     db.session.commit()
     return jsonify({'message': 'Image deleted'}), 200
 
+
+
+# Delete a category (Moderator or Admin)
+@app.route('/categories/<int:cat_id>', methods=['DELETE','OPTIONS'])
+@jwt_required
+def delete_category(cat_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    user = User.query.get(request.user_id)
+    if user.role not in ['Admin', 'Moderator']:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    cat = Category.query.get_or_404(cat_id)
+    db.session.delete(cat)
+    db.session.commit()
+    return jsonify({'message': 'Category deleted'}), 200
 
 
 if __name__ == '__main__':
