@@ -3,6 +3,8 @@ from flask_jwt_extended import get_jwt_identity
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from datetime import datetime, timedelta
+
+from sqlalchemy import event, Engine
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from flask import Flask, request, jsonify, url_for, send_from_directory, abort
@@ -27,6 +29,13 @@ CORS(app,
      supports_credentials=True
 )
 
+
+
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_fks(dbapi_conn, conn_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 BASE_UPLOAD = os.path.join(app.root_path, 'static', 'uploads')
@@ -219,6 +228,14 @@ def upload_avatar():
     file = request.files.get('avatar')
     if not file or not allowed_file(file.filename):
         return jsonify({'error': 'Invalid or missing avatar file'}), 400
+
+    user = User.query.get(request.user_id)
+
+    if user.avatar:
+        try:
+            os.remove(os.path.join(AVATARS_UPLOAD, user.avatar))
+        except OSError:
+            pass
 
     fn = secure_filename(file.filename)
     unique = f"{uuid.uuid4().hex}_{fn}"
@@ -556,6 +573,13 @@ def delete_post(post_id):
     # Разрешаем удаление, если пользователь - админ или автор поста
     if not user or (user.role != 'Admin' and post.user_id != user.id):
         return jsonify({'error': 'Доступ запрещён'}), 403
+
+    for img in post.images:
+        try:
+            os.remove(os.path.join(POSTS_UPLOAD, img.filename))
+        except OSError:
+            pass  # file might already be gone, ignore
+
 
     db.session.delete(post)
     db.session.commit()
