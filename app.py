@@ -752,56 +752,76 @@ def get_post_likes(post_id):
         'liked': liked
     }), 200
 
-
-
-@app.route('/user/profile', methods=['GET'])
+@app.route('/user/profile', methods=['GET','PUT','OPTIONS'])
 @jwt_required
 def user_profile():
-    u = User.query.get_or_404(request.user_id)
-    avatar_url = None
-    if u.avatar:
-        avatar_url = url_for('uploaded_file', folder='avatars', filename=u.avatar, _external=True)
+    # allow CORS preflight
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
 
-    # user_posts = []
-    # for p in u.posts:
-    #     user_posts.append({
-    #         'id': p.id,
-    #         'title': p.title,
-    #         'images': [
-    #           url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
-    #           for img in p.images
-    #         ]
-    #     })
-    #
-    user_posts = []
-
-    for p in u.posts:
-        user_posts.append({
+    # ---- GET: return profile + posts ----
+    if request.method == 'GET':
+        u = User.query.get_or_404(request.user_id)
+        avatar_url = None
+        if u.avatar:
+            avatar_url = url_for('uploaded_file',
+                                 folder='avatars',
+                                 filename=u.avatar,
+                                 _external=True)
+        user_posts = [{
             'id': p.id,
             'title': p.title,
-            # send id+url pairs just like /posts
             'images': [
-            {
-                'id': img.id,
-                'url': url_for('uploaded_file',
-                folder = 'posts',
-                filename = img.filename,
-                _external = True)
-            }
-            for img in p.images
+                url_for('uploaded_file', folder='posts', filename=img.filename, _external=True)
+                for img in p.images
             ]
-        })
+        } for p in u.posts]
+        return jsonify({
+            'user': {
+                'id':         u.id,
+                'username':   u.username,
+                'email':      u.email,
+                'role':       u.role,
+                'avatar_url': avatar_url
+            },
+            'posts': user_posts
+        }), 200
+
+    # ---- PUT: update username/email ----
+    data = request.get_json() or {}
+    new_username = data.get('username', '').strip()
+    new_email    = data.get('email', '').strip()
+    if not new_username or not new_email:
+        return jsonify({'error': 'Username and email are required'}), 400
+
+    # ensure uniqueness
+    if User.query.filter(User.id != request.user_id, User.username == new_username).first():
+        return jsonify({'error': 'Username already taken'}), 400
+    if User.query.filter(User.id != request.user_id, User.email == new_email).first():
+        return jsonify({'error': 'Email already taken'}), 400
+
+    user = User.query.get_or_404(request.user_id)
+    user.username = new_username
+    user.email    = new_email
+    db.session.commit()
+
+    avatar_url = None
+    if user.avatar:
+        avatar_url = url_for('uploaded_file',
+                             folder='avatars',
+                             filename=user.avatar,
+                             _external=True)
 
     return jsonify({
         'user': {
-            'id': u.id,
-            'username': u.username,
-            'email': u.email,
-            'role': u.role,
+            'id':         user.id,
+            'username':   user.username,
+            'email':      user.email,
+            'role':       user.role,
             'avatar_url': avatar_url
-        },
-        'posts': user_posts
+        }
     }), 200
+
 
 
 
